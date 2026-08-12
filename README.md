@@ -161,8 +161,8 @@ Set-Location ..
 ```powershell
 Set-Location cdk
 npx cdk deploy --all `
-  --context domainName=blue-green-lambda.sircloud.com `
-  --context hostedZoneName=sircloud.com `
+  --context domainName=blue-green-lambda.sircloud.pl `
+  --context hostedZoneName=sircloud.pl `
   --context color=blue `
   --context repositoryOwner=YOUR_GITHUB_USER `
   --context repositoryName=lambda-blue-green
