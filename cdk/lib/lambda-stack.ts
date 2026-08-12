@@ -4,13 +4,15 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as acm from "aws-cdk-lib/aws-certificatemanager";
+import * as route53 from "aws-cdk-lib/aws-route53";
+import * as route53Targets from "aws-cdk-lib/aws-route53-targets";
 import * as codedeploy from "aws-cdk-lib/aws-codedeploy";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import { Construct } from "constructs";
 
 export interface LambdaStackProps extends cdk.StackProps {
   readonly domainName: string;
-  readonly certificateArn: string;
+  readonly hostedZoneName: string;
   readonly color: string;
 }
 
@@ -26,7 +28,7 @@ export class LambdaStack extends cdk.Stack {
     // - Lambda execution role: CloudWatch Logs permissions only
     // - No wildcard (*) actions or wildcard (*) resources
     this.lambdaFunction = new lambda.Function(this, "Handler", {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       handler: "handler.handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../../lambda/dist")),
       memorySize: 256,
@@ -49,12 +51,16 @@ export class LambdaStack extends cdk.Stack {
       this.liveAlias
     );
 
-    // Custom domain with ACM certificate
-    const certificate = acm.Certificate.fromCertificateArn(
-      this,
-      "Certificate",
-      props.certificateArn
-    );
+    // Look up the Route 53 hosted zone for DNS validation and alias record
+    const hostedZone = route53.HostedZone.fromLookup(this, "HostedZone", {
+      domainName: props.hostedZoneName,
+    });
+
+    // Create ACM certificate with automatic DNS validation via Route 53
+    const certificate = new acm.Certificate(this, "Certificate", {
+      domainName: props.domainName,
+      validation: acm.CertificateValidation.fromDns(hostedZone),
+    });
 
     const customDomain = new apigwv2.DomainName(this, "CustomDomain", {
       domainName: props.domainName,
@@ -84,6 +90,18 @@ export class LambdaStack extends cdk.Stack {
     new cdk.CfnOutput(this, "LambdaFunctionArn", {
       value: this.lambdaFunction.functionArn,
       description: "Lambda function ARN",
+    });
+
+    // Route 53 alias record pointing custom domain to API Gateway
+    new route53.ARecord(this, "ApiAliasRecord", {
+      zone: hostedZone,
+      recordName: props.domainName,
+      target: route53.RecordTarget.fromAlias(
+        new route53Targets.ApiGatewayv2DomainProperties(
+          customDomain.regionalDomainName,
+          customDomain.regionalHostedZoneId
+        )
+      ),
     });
 
     // CloudWatch alarm monitoring Lambda function errors

@@ -5,6 +5,12 @@ import { PipelineStack } from "../lib/pipeline-stack";
 
 const app = new cdk.App();
 
+// Resolve account/region from CLI credentials for HostedZone.fromLookup
+const env: cdk.Environment = {
+  account: process.env.CDK_DEFAULT_ACCOUNT,
+  region: process.env.CDK_DEFAULT_REGION,
+};
+
 const domainName = app.node.tryGetContext("domainName");
 if (!domainName) {
   throw new Error(
@@ -12,10 +18,10 @@ if (!domainName) {
   );
 }
 
-const certificateArn = app.node.tryGetContext("certificateArn");
-if (!certificateArn) {
+const hostedZoneName = app.node.tryGetContext("hostedZoneName");
+if (!hostedZoneName) {
   throw new Error(
-    "Required CDK context parameter 'certificateArn' is missing"
+    "Required CDK context parameter 'hostedZoneName' is missing"
   );
 }
 
@@ -29,12 +35,14 @@ if (color !== "blue" && color !== "green") {
 }
 
 const lambdaStack = new LambdaStack(app, "LambdaStack", {
+  env,
   domainName,
-  certificateArn,
+  hostedZoneName,
   color,
 });
 
 new PipelineStack(app, "PipelineStack", {
+  env,
   deploymentGroup: lambdaStack.deploymentGroup,
   repositoryOwner: app.node.tryGetContext("repositoryOwner") ?? "owner",
   repositoryName: app.node.tryGetContext("repositoryName") ?? "lambda-blue-green",

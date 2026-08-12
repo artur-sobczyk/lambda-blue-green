@@ -1,40 +1,112 @@
 # Lambda Blue/Green Deployment
 
-AWS Lambda blue/green deployment demo using CodePipeline, CodeDeploy, and API Gateway with a custom domain.
-
-Push to `main` triggers the pipeline: source → build → deploy with linear 50% traffic shifting per minute.
+AWS Lambda blue/green deployment demo using CodePipeline, CodeDeploy, and API Gateway with a custom domain. Push to `main` triggers the pipeline: source → build → deploy with linear 50% traffic shifting per minute.
 
 ## Architecture
 
-```
-GitHub push → CodePipeline → CodeBuild (compile TS) → CodeDeploy (50%/min traffic shift)
-                                                            ↓
-                                              Lambda (blue or green HTML)
-                                                            ↓
-                                              API Gateway HTTP API
-                                                            ↓
-                                              Custom Domain (HTTPS)
+### High-Level Overview
+
+```mermaid
+graph LR
+    Developer -->|push to main| GitHub
+    GitHub -->|webhook| CodePipeline
+    CodePipeline --> CodeBuild
+    CodeBuild -->|compiled JS| CodeDeploy
+    CodeDeploy -->|traffic shift| Lambda
+    Lambda --> API_Gateway[API Gateway HTTP API]
+    API_Gateway --> Route53[Route 53]
+    Route53 -->|blue-green-lambda.sircloud.com| User
 ```
 
-**Components:**
+### Infrastructure Diagram
 
-- **Lambda Function** — Returns an HTML page with background color (blue or green) based on `COLOR` environment variable. Logs source IP and user-agent on every invocation.
-- **API Gateway HTTP API** — Proxies requests to the Lambda alias with a custom domain and ACM certificate.
-- **CodeDeploy** — Manages blue/green traffic shifting (50% per minute) with automatic rollback on errors.
-- **CodePipeline** — Three-stage pipeline (Source → Build → Deploy) triggered by GitHub pushes.
-- **CloudWatch Alarm** — Monitors Lambda errors; triggers CodeDeploy rollback during deployment.
+```mermaid
+graph TD
+    subgraph Route 53
+        Zone[Hosted Zone: sircloud.com]
+        ARecord[A Record: blue-green-lambda.sircloud.com]
+    end
+
+    subgraph ACM
+        Cert[Certificate: blue-green-lambda.sircloud.com<br/>DNS validated via Route 53]
+    end
+
+    subgraph API Gateway
+        Domain[Custom Domain Name]
+        HttpApi[HTTP API]
+        Route[Default Route → Lambda]
+    end
+
+    subgraph Lambda
+        Alias[Alias: live]
+        V1[Version N - current]
+        V2[Version N+1 - new]
+    end
+
+    subgraph CodeDeploy
+        App[Lambda Application]
+        DG[Deployment Group<br/>Linear 50%/min]
+        Alarm[CloudWatch Alarm<br/>Lambda Errors ≥ 1]
+    end
+
+    Zone --> ARecord
+    ARecord -->|alias| Domain
+    Cert --> Domain
+    Domain --> HttpApi --> Route --> Alias
+    Alias --> V1
+    Alias -.->|shifting| V2
+    DG --> Alias
+    Alarm -.->|rollback trigger| DG
+```
+
+### Pipeline Stages
+
+```mermaid
+graph LR
+    S[Source<br/>GitHub via CodeStar] --> B[Build<br/>CodeBuild 10min timeout]
+    B --> D[Deploy<br/>CloudFormation → CodeDeploy]
+
+    style S fill:#f9f,stroke:#333
+    style B fill:#bbf,stroke:#333
+    style D fill:#bfb,stroke:#333
+```
+
+### Traffic Shifting Timeline
+
+```mermaid
+gantt
+    title CodeDeploy Linear 50% / 1 min
+    dateFormat mm:ss
+    axisFormat %M:%S
+
+    section Traffic
+    50% old + 50% new   :a1, 00:00, 1m
+    100% new            :a2, after a1, 1m
+```
+
+## Components
+
+| Component | Description |
+|-----------|-------------|
+| **Lambda Function** | Returns HTML with background color (blue/green) based on `COLOR` env var. Logs source IP and user-agent. |
+| **API Gateway HTTP API** | Proxies all requests to the Lambda alias via custom domain with TLS. |
+| **ACM Certificate** | Created by CDK with automatic DNS validation through Route 53. |
+| **Route 53** | Alias record pointing custom domain to API Gateway regional endpoint. |
+| **CodeDeploy** | Manages blue/green traffic shifting (50%/min) with CloudWatch alarm rollback. |
+| **CodePipeline** | Three-stage pipeline (Source → Build → Deploy) triggered by GitHub pushes. |
+| **CloudWatch Alarm** | Monitors Lambda errors; triggers automatic rollback during deployment. |
 
 ## Project Structure
 
 ```
 lambda-blue-green/
-├── cdk/              # CDK infrastructure (Pipeline, Lambda, API GW, CodeDeploy)
-│   ├── bin/app.ts    # Entry point — reads context params, instantiates stacks
+├── cdk/                        # CDK infrastructure
+│   ├── bin/app.ts              # Entry point — validates context, instantiates stacks
 │   └── lib/
-│       ├── lambda-stack.ts    # Lambda, API Gateway, custom domain, CodeDeploy
-│       └── pipeline-stack.ts  # CodePipeline with Source/Build/Deploy stages
-├── lambda/           # Lambda function (TypeScript)
-│   └── src/handler.ts
+│       ├── lambda-stack.ts     # Lambda, API GW, Route 53, ACM, CodeDeploy
+│       └── pipeline-stack.ts   # CodePipeline (Source/Build/Deploy)
+├── lambda/                     # Lambda function
+│   └── src/handler.ts          # Handler returning colored HTML
 └── README.md
 ```
 
@@ -43,15 +115,15 @@ lambda-blue-green/
 - Node.js 20+
 - AWS CDK CLI (`npm install -g aws-cdk`)
 - AWS CLI configured with credentials
-- ACM certificate covering your domain (in the deployment region)
-- GitHub connection set up in AWS CodeStar Connections (for the pipeline)
+- Route 53 hosted zone for your domain (CDK creates the certificate and DNS records automatically)
+- GitHub connection in AWS CodeStar Connections (for the pipeline)
 
 ## CDK Context Parameters
 
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `domainName` | Yes | — | Custom domain (e.g. `blue-green-lambda.sircloud.com`) |
-| `certificateArn` | Yes | — | ACM certificate ARN for the domain |
+| `hostedZoneName` | Yes | — | Route 53 hosted zone (e.g. `sircloud.com`) |
 | `color` | No | `blue` | Lambda response color (`blue` or `green`) |
 | `repositoryOwner` | No | `owner` | GitHub org/user |
 | `repositoryName` | No | `lambda-blue-green` | GitHub repo name |
@@ -90,49 +162,51 @@ Set-Location ..
 Set-Location cdk
 npx cdk deploy --all `
   --context domainName=blue-green-lambda.sircloud.com `
-  --context certificateArn=arn:aws:acm:us-east-1:ACCOUNT:certificate/CERT-ID `
+  --context hostedZoneName=sircloud.com `
   --context color=blue `
   --context repositoryOwner=YOUR_GITHUB_USER `
   --context repositoryName=lambda-blue-green
 Set-Location ..
 ```
 
-### 5. Configure DNS
+CDK will:
+- Create an ACM certificate and validate it via Route 53 DNS
+- Deploy Lambda, API Gateway, custom domain, and CodeDeploy resources
+- Create a Route 53 alias record pointing your domain to API Gateway
+- Deploy the CodePipeline with GitHub source integration
 
-After deploy, grab the `ApiGatewayDomainName` output and create a CNAME record:
+### 5. Verify
 
-```
-blue-green-lambda.sircloud.com → <ApiGatewayDomainName output value>
-```
+Open `https://blue-green-lambda.sircloud.com` — you should see a blue page.
 
 ## Switch Color (trigger blue/green deployment)
-
-Change the `color` context and redeploy:
 
 ```powershell
 Set-Location cdk
 npx cdk deploy LambdaStack `
   --context domainName=blue-green-lambda.sircloud.com `
-  --context certificateArn=arn:aws:acm:us-east-1:ACCOUNT:certificate/CERT-ID `
+  --context hostedZoneName=sircloud.com `
   --context color=green
 Set-Location ..
 ```
 
-CodeDeploy shifts 50% of traffic to the new version after 1 minute, then completes at 2 minutes. If the Lambda errors alarm fires during shifting, traffic automatically rolls back.
+CodeDeploy shifts 50% of traffic after 1 minute, then 100% after 2 minutes. If the CloudWatch alarm fires during shifting, traffic rolls back automatically.
 
 ## Useful Commands
 
 ```powershell
 # Synthesize CloudFormation templates
-Set-Location cdk; npx cdk synth --context domainName=... --context certificateArn=...
+Set-Location cdk
+npx cdk synth --context domainName=blue-green-lambda.sircloud.com --context hostedZoneName=sircloud.com
 
 # Diff changes before deploying
-Set-Location cdk; npx cdk diff --all --context domainName=... --context certificateArn=...
+npx cdk diff --all --context domainName=blue-green-lambda.sircloud.com --context hostedZoneName=sircloud.com
 
 # Destroy all stacks
-Set-Location cdk; npx cdk destroy --all --context domainName=... --context certificateArn=...
+npx cdk destroy --all --context domainName=blue-green-lambda.sircloud.com --context hostedZoneName=sircloud.com
+Set-Location ..
 ```
 
 ## Deployment Strategy
 
-CodeDeploy uses **Linear 50% every 1 minute** — the new Lambda version receives 50% of traffic after 1 minute, then 100% after 2 minutes. A CloudWatch alarm on Lambda errors triggers automatic rollback if issues are detected during the shift.
+**Linear 50% every 1 minute** — CodeDeploy shifts 50% of traffic to the new Lambda version after 1 minute, then completes full cutover at 2 minutes. A CloudWatch alarm monitoring Lambda function errors triggers automatic rollback if issues are detected during the traffic shift.
