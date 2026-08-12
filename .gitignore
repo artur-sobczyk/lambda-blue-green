@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+lambda/dist/
+cdk/dist/
+
+# CDK
+cdk.out/
+cdk.context.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.*
